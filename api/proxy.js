@@ -1,72 +1,53 @@
-import { fetch } from 'undici';   // Vercel 内置，无需安装
-
-export const config = {
-  api: {
-    bodyParser: false,
-    externalResolver: true,
-  },
-};
+// api/proxy.js   ← 2025 年最新 Vercel 完全兼容版
+import { fetch } from 'undici';
 
 export default async function handler(req, res) {
-  const { method, url, headers } = req;
+  // 直接用 req.json() 读取 body（新版 Vercel 唯一合法方式）
+  let body = {};
+  try {
+    body = await req.json();
+  } catch (e) {
+    // GET 请求或空 body 时忽略
+  }
 
-  // 把 /api/v1/... 转成 https://api.x.ai/v1/...
-  const targetPath = url.replace(/^\/api/, '');
+  // 路径转换：/api/v1/... → https://api.x.ai/v1/...
+  const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
+  const targetPath = pathname;                     // 现在已经是 /v1/xxx 格式了
   const targetUrl = `https://api.x.ai${targetPath}`;
 
-  // 你的 xAI API Key（稍后在 Vercel 后台填）
   const apiKey = process.env.XAI_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: "XAI_API_KEY 未设置" });
+  if (!apiKey) return res.status(500).json({ error: "缺少 XAI_API_KEY" });
+
+  // 强制清除所有审核字段
+  delete body.safety_settings;
+  delete body.moderation_level;
+  delete body.filters;
+  delete body.blocked;
+
+  // 图像生成强制用最新模型
+  if (targetPath.includes('/images/generations')) {
+    body.model = body.model || "grok-2-image-1212";
   }
 
-  try {
-    // 读取原始 body（流式）
-    const rawBody = await new Promise((resolve, reject) => {
-      const chunks = [];
-      req.on('data', chunk => chunks.push(chunk));
-      req.on('end', () => resolve(Buffer.concat(chunks)));
-      req.on('error', reject);
-    });
+  const response = await fetch(targetUrl, {
+    method: req.method,
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: req.method !== "GET" ? JSON.stringify(body) : undefined,
+  });
 
-    let modifiedBody = {};
-    if (rawBody.length > 0) {
-      try {
-        modifiedBody = JSON.parse(rawBody.toString());
-      } catch (e) {}
-    }
-
-    // 强制清除所有可能的安全/审核字段
-    delete modifiedBody.safety_settings;
-    delete modifiedBody.moderation_level;
-    delete modifiedBody.filters;
-    delete modifiedBody.blocked;
-
-    // 强制使用图像模型（你想用哪个改哪个）
-    if (targetPath.includes('/images/generations')) {
-      modifiedBody.model = modifiedBody.model || "grok-2-image-1212";  // 2025 最新图像模型
-    }
-
-    const response = await fetch(targetUrl, {
-      method,
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        ...headers,
-        host: undefined,   // 去掉 Vercel 的 host
-      },
-      body: Object.keys(modifiedBody).length ? JSON.stringify(modifiedBody) : undefined,
-    });
-
-    // 直接透传 xAI 的响应（包括图片 base64）
-    res.status(response.status);
-    for (const [k, v] of response.headers) {
-      res.setHeader(k, v);
-    }
-    response.body.pipe(res);
-
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "代理出错", message: error.message });
-  }
+  // 直接透传所有 header 和 body
+  res.status(response.status);
+  response.headers.forEach((value, key) => res.setHeader(key, value));
+  response.body.pipe(res);
 }
+
+// 关键：关闭 Vercel 自动 bodyParser（必须加这行！！！）
+export const config = {
+  api: {
+    bodyParser: false,        // 必须关掉
+    externalResolver: true,   // 必须打开
+  },
+};
