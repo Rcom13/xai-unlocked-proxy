@@ -1,8 +1,12 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "cleanUrls": false,
   "rewrites": [
     {
-      "source": "/api/v1/:path*",
+      "source": "/api/(.*)",
+      "destination": "/api/proxy.js"
+    },
+    {
+      "source": "/v1/(.*)",
       "destination": "/api/proxy.js"
     }
   ]

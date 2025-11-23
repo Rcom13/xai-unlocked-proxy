@@ -1,30 +1,33 @@
-// api/proxy.js   ← 2025 年最新 Vercel 完全兼容版
+// api/proxy.js  2025 Vercel 路径透传优化版
 import { fetch } from 'undici';
 
 export default async function handler(req, res) {
-  // 直接用 req.json() 读取 body（新版 Vercel 唯一合法方式）
   let body = {};
   try {
     body = await req.json();
   } catch (e) {
-    // GET 请求或空 body 时忽略
+    // GET 或空 body 忽略
   }
 
-  // 路径转换：/api/v1/... → https://api.x.ai/v1/...
-  const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
-  const targetPath = pathname;                     // 现在已经是 /v1/xxx 格式了
+  // 精确路径解析：从 req.url 提取，避开 /api/ 前缀
+  let targetPath = req.url;
+  if (targetPath.startsWith('/api/')) {
+    targetPath = targetPath.replace('/api/', '/v1/');  // 转成 xAI 标准 /v1/...
+  } else if (targetPath.startsWith('/v1/')) {
+    // 已标准
+  } else {
+    return res.status(400).json({ error: "Invalid path" });
+  }
   const targetUrl = `https://api.x.ai${targetPath}`;
 
   const apiKey = process.env.XAI_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: "缺少 XAI_API_KEY" });
+  if (!apiKey) return res.status(500).json({ error: "XAI_API_KEY 未设置" });
 
-  // 强制清除所有审核字段
+  // 清除审核 + 图像优化（不变）
   delete body.safety_settings;
   delete body.moderation_level;
   delete body.filters;
   delete body.blocked;
-
-  // 图像生成强制用最新模型
   if (targetPath.includes('/images/generations')) {
     body.model = body.model || "grok-2-image-1212";
   }
@@ -38,16 +41,14 @@ export default async function handler(req, res) {
     body: req.method !== "GET" ? JSON.stringify(body) : undefined,
   });
 
-  // 直接透传所有 header 和 body
   res.status(response.status);
   response.headers.forEach((value, key) => res.setHeader(key, value));
   response.body.pipe(res);
 }
 
-// 关键：关闭 Vercel 自动 bodyParser（必须加这行！！！）
 export const config = {
   api: {
-    bodyParser: false,        // 必须关掉
-    externalResolver: true,   // 必须打开
+    bodyParser: false,
+    externalResolver: true,
   },
 };
